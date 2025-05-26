@@ -1,12 +1,6 @@
 <h1 align="center">
-    <p> DenseLoRA: Dense Low-Rank Adaptation of Large Language Models <br> [ACL 2025]</p>
+    <p> DenseLoRA: Dense Low-Rank Adaptation of Large Language Models <br> [ACL 2025(main)]</p>
 </h1>
-
-
-## Useful Links
-
-- An amazing tutorial about implementing DoRA from scratch by Sebastian Raschka, see https://magazine.sebastianraschka.com/p/lora-and-dora-from-scratch 
-- An amazing blog post from Answer.AI about QDoRA/FSDP which allows finetuning LLMs on consumer-level GPUs, see https://www.answer.ai/posts/2024-04-26-fsdp-qdora-llama3.html
 
 ## Quick Start and some tricks regarding finetuning with DenseLoRA
 ### Setup
@@ -28,13 +22,13 @@ sh llama3_8B_denselora_eval.sh ./finetuned_result/llama3-87b/ 0
 ```
 
 ## Citation
-If you find DoRA useful, please consider giving a star and citation:
+If you find DenseLoRA useful, please consider giving a star and citation:
 ```bibtex
-@article{liu2024dora,
-  title={DoRA: Weight-Decomposed Low-Rank Adaptation},
-  author={Liu, Shih-Yang and Wang, Chien-Yi and Yin, Hongxu and Molchanov, Pavlo and Wang, Yu-Chiang Frank and Cheng, Kwang-Ting and Chen, Min-Hung},
-  journal={arXiv preprint arXiv:2402.09353},
-  year={2024}
+@Inproceedings{mu2025denselora,
+  title={DenseLoRA: Dense Low-Rank Adaptation of Large Language Models},
+  author={Lin Mu, Xiaoyu Wang, Li Ni, Yang Li, Zhize Wu, Peiquan Jin, Yiwen Zhang},
+  booktitle = {Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
+  year={2025}
 }
 ```
 
