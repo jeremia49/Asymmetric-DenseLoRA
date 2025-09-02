@@ -115,7 +115,6 @@ class LoraModel(torch.nn.Module):
         super().__init__()
         self.peft_config = config
         self.model = model
-        self.r2 = 32
 
         self.lora_encoder_q = nn.Linear(4096, config.r, bias=False)
         self.lora_decoder_q = nn.Linear(config.r, 4096, bias=False)
