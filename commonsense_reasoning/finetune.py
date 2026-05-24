@@ -166,7 +166,28 @@ def train(
             print("load llama-3 tokenizer")
             tokenizer = AutoTokenizer.from_pretrained(base_model)
         else:
-            tokenizer = LlamaTokenizer.from_pretrained(base_model)
+            # Some Llama-2 repos (e.g. winglian/llama-2-4b) ship a tokenizer_config.json
+            # that encodes bos/eos/unk as AddedToken dicts with __type keys. transformers
+            # 4.36 chokes on that with `TypeError: unhashable type: 'dict'`. Try the normal
+            # path first, and on failure fall back to building LlamaTokenizer from just the
+            # SentencePiece vocab (the spm file is identical across Llama-2 sizes).
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(base_model)
+            except (TypeError, ValueError) as e:
+                print(f"AutoTokenizer load failed ({e!r}); falling back to LlamaTokenizer "
+                      f"from raw tokenizer.model.")
+                from huggingface_hub import hf_hub_download
+                spm_path = hf_hub_download(repo_id=base_model, filename="tokenizer.model")
+                tokenizer = LlamaTokenizer(
+                    vocab_file=spm_path,
+                    bos_token="<s>",
+                    eos_token="</s>",
+                    unk_token="<unk>",
+                    pad_token=None,
+                    add_bos_token=True,
+                    add_eos_token=False,
+                    legacy=False,
+                )
     else:
         tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
@@ -261,6 +282,26 @@ def train(
     if adapter_name == "prefix-tuning":
         model.to('cuda')
 
+    # The vendored peft only wires gradient checkpointing inside an `if loaded_in_8bit:` branch
+    # of prepare_model_for_int8_training. We're not in 8-bit, so enable it here on the PEFT model.
+    if use_gradient_checkpointing:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+            def _make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+            model.get_input_embeddings().register_forward_hook(_make_inputs_require_grad)
+        # use_reentrant=True is the default and works with SDPA. Setting it explicitly silences
+        # the "starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise"
+        # warning. Do NOT switch to False here — non-reentrant checkpointing has a separate bug
+        # with Llama SDPA where saved/recomputed kv tensors disagree on shape.
+        try:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": True}
+            )
+        except TypeError:
+            model.gradient_checkpointing_enable()
+
     if data_path.endswith(".json"):  # todo: support jsonl
         data = load_dataset("json", data_files=data_path)
     else:
@@ -347,8 +388,10 @@ def train(
         )
     ).__get__(model, type(model))
 
-    if torch.__version__ >= "2" and sys.platform != "win32":
-        model = torch.compile(model)
+    # NOTE: torch.compile was added when torch 2.0 was new; on torch 2.12 it breaks the
+    # autograd graph for PEFT-wrapped models (loss has no grad_fn). Leaving disabled.
+    # if torch.__version__ >= "2" and sys.platform != "win32":
+    #     model = torch.compile(model)
     #model.save_pretrained(output_dir+"_init")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 

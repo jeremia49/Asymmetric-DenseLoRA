@@ -116,17 +116,26 @@ class LoraModel(torch.nn.Module):
         self.peft_config = config
         self.model = model
 
-        self.lora_encoder_q = nn.Linear(4096, config.r, bias=False)
-        self.lora_decoder_q = nn.Linear(config.r, 4096, bias=False)
-        self.lora_encoder_k = nn.Linear(4096, config.r, bias=False)
-        self.lora_decoder_k = nn.Linear(config.r, 1024, bias=False)
-        self.lora_encoder_v = nn.Linear(4096, config.r, bias=False)
-        self.lora_decoder_v = nn.Linear(config.r, 1024, bias=False)
+        # Derive shapes from the wrapped model's config so this works for
+        # Llama-2 (no GQA, MLP 11008), Llama-3 (GQA kv=1024, MLP 14336), etc.
+        mconf = getattr(model, "config", None)
+        hidden = getattr(mconf, "hidden_size", 4096)
+        intermediate = getattr(mconf, "intermediate_size", 11008)
+        num_heads = getattr(mconf, "num_attention_heads", 32)
+        num_kv_heads = getattr(mconf, "num_key_value_heads", num_heads)
+        kv_dim = hidden * num_kv_heads // num_heads
 
-        self.lora_encoder_up = nn.Linear(4096, config.r, bias=False)
-        self.lora_decoder_up = nn.Linear(config.r, 14336, bias=False)
-        self.lora_encoder_down = nn.Linear(14336, config.r, bias=False)
-        self.lora_decoder_down = nn.Linear(config.r, 4096, bias=False)
+        self.lora_encoder_q = nn.Linear(hidden, config.r, bias=False)
+        self.lora_decoder_q = nn.Linear(config.r, hidden, bias=False)
+        self.lora_encoder_k = nn.Linear(hidden, config.r, bias=False)
+        self.lora_decoder_k = nn.Linear(config.r, kv_dim, bias=False)
+        self.lora_encoder_v = nn.Linear(hidden, config.r, bias=False)
+        self.lora_decoder_v = nn.Linear(config.r, kv_dim, bias=False)
+
+        self.lora_encoder_up = nn.Linear(hidden, config.r, bias=False)
+        self.lora_decoder_up = nn.Linear(config.r, intermediate, bias=False)
+        self.lora_encoder_down = nn.Linear(intermediate, config.r, bias=False)
+        self.lora_decoder_down = nn.Linear(config.r, hidden, bias=False)
         self.reset_parameters()
 
         self._find_and_replace()
@@ -340,7 +349,7 @@ class Linear(nn.Linear, LoraLayer):
         self.merge_weights = False
         self.fan_in_fan_out = fan_in_fan_out
         # Actual trainable parameters
-        self.lora_type = "denseLora"
+        self.lora_type = "denselora"
         self.lora_encoder = lora_encoder
         self.lora_decoder = lora_decoder
         self.nolinear = nn.GELU()
@@ -364,7 +373,7 @@ class Linear(nn.Linear, LoraLayer):
                 nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_B.weight)
             else:
-                nn.init.kaiming_uniform_(self.lora_.weight, a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.lora_m.weight, a=math.sqrt(5))
 
     def train(self, mode: bool = True):
         nn.Linear.train(self, mode)

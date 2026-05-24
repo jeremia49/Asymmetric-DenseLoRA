@@ -1,5 +1,5 @@
 CUDA_VISIBLE_DEVICES=$4 python finetune.py \
-    --base_model 'NousResearch/Llama-2-7b-hf' \
+    --base_model 'kimnt93/chat-llama2-1b-1.0' \
     --data_path 'commonsense_170k.json' \
     --output_dir $3 \
     --batch_size 16  --micro_batch_size 4 --num_epochs 2 \
