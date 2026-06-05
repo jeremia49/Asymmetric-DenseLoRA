@@ -22,7 +22,7 @@ Unused imports:
 import torch.nn as nn
 import bitsandbytes as bnb
 """
-sys.path.append(os.path.join(os.getcwd(), "peft/src/"))
+sys.path.insert(0, os.path.join(os.getcwd(), "peft/src/"))  # insert(0): peft LOKAL selalu menang atas peft pip
 from peft import (  # noqa: E402
     LoraConfig,
     DoraConfig,
@@ -43,6 +43,7 @@ def train(
         output_dir: str = "./lora-alpaca",
         adapter_name: str = "lora",
         load_8bit : bool = False,
+        data_fraction: float = 1.0,  # fraction (0,1] of the training set to keep (e.g. 0.4 = 40%)
         # training hyperparams
         batch_size: int = 128,
         micro_batch_size: int = 4,
@@ -57,6 +58,9 @@ def train(
         # lora hyperparams
         lora_r: int = 8,
         lora_alpha: int = 16,
+        lora_r1: int = None,        # DenseLoRA asymmetric: encoder->M input rank (default = lora_r)
+        lora_r2: int = None,        # DenseLoRA asymmetric: M->decoder output rank (default = lora_r)
+        dense_activation: str = "gelu",  # DenseLoRA activation: gelu | silu | golu
         lora_dropout: float = 0.05,
         lora_target_modules: List[str] = None,
         # bottleneck adapter hyperparams
@@ -81,6 +85,7 @@ def train(
         wandb_watch: str = "",  # options: false | gradients | all
         wandb_log_model: str = "",  # options: false | true
         resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
+        auto_resume: bool = False,  # if True, auto-detect the latest checkpoint in output_dir and resume training from it
         safetensors: bool = False,
 ):
     print(
@@ -243,6 +248,9 @@ def train(
     if adapter_name == "lora":
         config = LoraConfig(
             r=lora_r,
+            r1=lora_r1,
+            r2=lora_r2,
+            dense_activation=dense_activation,
             lora_alpha=lora_alpha,
             target_modules=target_modules,
             lora_dropout=lora_dropout,
@@ -307,25 +315,41 @@ def train(
     else:
         data = load_dataset(data_path)
 
-    if resume_from_checkpoint:
-        # Check the available weights and load them
-        checkpoint_name = os.path.join(
-            resume_from_checkpoint, "pytorch_model.bin"
-        )  # Full checkpoint
-        if not os.path.exists(checkpoint_name):
-            checkpoint_name = os.path.join(
-                resume_from_checkpoint, "adapter_model.bin"
-            )  # only LoRA model - LoRA config above has to fit
-            resume_from_checkpoint = (
-                False  # So the trainer won't try loading its state
-            )
-        # The two files above have a different name depending on how they were saved, but are actually the same.
-        if os.path.exists(checkpoint_name):
-            print(f"Restarting from {checkpoint_name}")
-            adapters_weights = torch.load(checkpoint_name)
-            model = set_peft_model_state_dict(model, adapters_weights)
+    # Optionally use only a fraction of the training data (e.g. data_fraction=0.4 for 40%).
+    # Shuffle with a fixed seed first so the subset is a representative random sample and
+    # reproducible across runs.
+    if data_fraction < 1.0:
+        assert 0.0 < data_fraction <= 1.0, "data_fraction must be in (0, 1]"
+        full_n = len(data["train"])
+        keep_n = int(full_n * data_fraction)
+        data["train"] = data["train"].shuffle(seed=42).select(range(keep_n))
+        print(f"[data_fraction] Using {keep_n}/{full_n} training samples "
+              f"({data_fraction:.0%}).")
+
+    # ------------------------------------------------------------------
+    # Resume logic.
+    #
+    # `auto_resume=True` is the recommended path for Colab: it auto-detects the
+    # most recent `checkpoint-XXXX` folder inside `output_dir` and lets the HF
+    # Trainer resume *natively*, i.e. it restores the optimizer state, LR
+    # scheduler, RNG state and global step so training continues exactly where it
+    # was interrupted (not just the adapter weights). Because `output_dir` lives
+    # on Google Drive, checkpoints survive a runtime disconnect.
+    #
+    # `resume_from_checkpoint=<path>` (the old flag) is kept for explicitly
+    # pointing at a specific checkpoint folder.
+    # ------------------------------------------------------------------
+    if auto_resume and not resume_from_checkpoint:
+        from transformers.trainer_utils import get_last_checkpoint
+        last_ckpt = None
+        if os.path.isdir(output_dir):
+            last_ckpt = get_last_checkpoint(output_dir)
+        if last_ckpt:
+            print(f"[auto_resume] Found checkpoint, resuming from: {last_ckpt}")
+            resume_from_checkpoint = last_ckpt
         else:
-            print(f"Checkpoint {checkpoint_name} not found")
+            print("[auto_resume] No checkpoint found in output_dir; starting from scratch.")
+            resume_from_checkpoint = None
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
@@ -333,14 +357,16 @@ def train(
         train_val = data["train"].train_test_split(
             test_size=val_set_size, shuffle=True, seed=42
         )
+        # Fixed seed so the dataset ordering is identical across runs; this is what
+        # makes native resume-from-checkpoint land on exactly the right batch.
         train_data = (
-            train_val["train"].shuffle().map(generate_and_tokenize_prompt)
+            train_val["train"].shuffle(seed=42).map(generate_and_tokenize_prompt)
         )
         val_data = (
-            train_val["test"].shuffle().map(generate_and_tokenize_prompt)
+            train_val["test"].shuffle(seed=42).map(generate_and_tokenize_prompt)
         )
     else:
-        train_data = data["train"].shuffle().map(generate_and_tokenize_prompt)
+        train_data = data["train"].shuffle(seed=42).map(generate_and_tokenize_prompt)
         val_data = None
 
     if not ddp and torch.cuda.device_count() > 1:

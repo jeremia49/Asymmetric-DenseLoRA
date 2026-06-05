@@ -29,11 +29,49 @@ from ..utils import PeftConfig, PeftType, transpose
 
 
 def is_bnb_available():
-    return importlib.util.find_spec("bitsandbytes") is not None
+    # Actually import (not just find_spec) so a broken bitsandbytes — e.g. missing CUDA
+    # binary for this torch/CUDA combo — is treated as "unavailable" instead of crashing
+    # the whole peft import chain. We never use 8-bit training here.
+    try:
+        import bitsandbytes  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 if is_bnb_available():
     import bitsandbytes as bnb
+
+
+class GoLU(nn.Module):
+    """Gompertz Linear Unit (Das et al., 2025, arXiv:2502.03654, official repo: automl/GoLU).
+
+        GoLU(x) = x * alpha * exp(-beta * exp(-gamma * x))
+
+    With the official defaults alpha=beta=gamma=1 this reduces to x * exp(-exp(-x)).
+    Pure-PyTorch (autograd) implementation so no CUDA-kernel build is needed on Colab;
+    the gate is computed in fp32 then cast back for numerical stability under fp16.
+    """
+    def __init__(self, alpha: float = 1.0, beta: float = 1.0, gamma: float = 1.0):
+        super().__init__()
+        self.alpha, self.beta, self.gamma = alpha, beta, gamma
+
+    def forward(self, x):
+        dt = x.dtype
+        xf = x.float()
+        gompertz = self.alpha * torch.exp(-self.beta * torch.exp(-self.gamma * xf))
+        return (xf * gompertz).to(dt)
+
+
+def _make_activation(name):
+    name = (name or "gelu").lower()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "silu":
+        return nn.SiLU()
+    if name == "golu":
+        return GoLU()
+    raise ValueError(f"Unknown dense_activation '{name}'. Use one of: gelu | silu | golu.")
 
 
 @dataclass
@@ -56,6 +94,9 @@ class LoraConfig(PeftConfig):
     """
 
     r: int = field(default=8, metadata={"help": "Lora attention dimension"})
+    r1: int = field(default=None, metadata={"help": "DenseLoRA asymmetric: encoder->M input rank (defaults to r)"})
+    r2: int = field(default=None, metadata={"help": "DenseLoRA asymmetric: M->decoder output rank (defaults to r)"})
+    dense_activation: str = field(default="gelu", metadata={"help": "DenseLoRA activation: gelu | silu | golu"})
     target_modules: Optional[Union[List[str], str]] = field(
         default=None,
         metadata={
@@ -125,17 +166,22 @@ class LoraModel(torch.nn.Module):
         num_kv_heads = getattr(mconf, "num_key_value_heads", num_heads)
         kv_dim = hidden * num_kv_heads // num_heads
 
-        self.lora_encoder_q = nn.Linear(hidden, config.r, bias=False)
-        self.lora_decoder_q = nn.Linear(config.r, hidden, bias=False)
-        self.lora_encoder_k = nn.Linear(hidden, config.r, bias=False)
-        self.lora_decoder_k = nn.Linear(config.r, kv_dim, bias=False)
-        self.lora_encoder_v = nn.Linear(hidden, config.r, bias=False)
-        self.lora_decoder_v = nn.Linear(config.r, kv_dim, bias=False)
+        # DenseLoRA ranks: encoder compresses hidden -> r1, the dense matrix M maps
+        # r1 -> r2, and the decoder reconstructs r2 -> out. Square (symmetric) when r1 == r2.
+        r1 = getattr(config, "r1", None) or config.r
+        r2 = getattr(config, "r2", None) or config.r
 
-        self.lora_encoder_up = nn.Linear(hidden, config.r, bias=False)
-        self.lora_decoder_up = nn.Linear(config.r, intermediate, bias=False)
-        self.lora_encoder_down = nn.Linear(intermediate, config.r, bias=False)
-        self.lora_decoder_down = nn.Linear(config.r, hidden, bias=False)
+        self.lora_encoder_q = nn.Linear(hidden, r1, bias=False)
+        self.lora_decoder_q = nn.Linear(r2, hidden, bias=False)
+        self.lora_encoder_k = nn.Linear(hidden, r1, bias=False)
+        self.lora_decoder_k = nn.Linear(r2, kv_dim, bias=False)
+        self.lora_encoder_v = nn.Linear(hidden, r1, bias=False)
+        self.lora_decoder_v = nn.Linear(r2, kv_dim, bias=False)
+
+        self.lora_encoder_up = nn.Linear(hidden, r1, bias=False)
+        self.lora_decoder_up = nn.Linear(r2, intermediate, bias=False)
+        self.lora_encoder_down = nn.Linear(intermediate, r1, bias=False)
+        self.lora_decoder_down = nn.Linear(r2, hidden, bias=False)
         self.reset_parameters()
 
         self._find_and_replace()
@@ -165,6 +211,9 @@ class LoraModel(torch.nn.Module):
         is_hf_device_map_available = hasattr(self.model, "hf_device_map")
         kwargs = {
             "r": self.peft_config.r,
+            "r1": getattr(self.peft_config, "r1", None) or self.peft_config.r,
+            "r2": getattr(self.peft_config, "r2", None) or self.peft_config.r,
+            "dense_activation": getattr(self.peft_config, "dense_activation", "gelu"),
             "lora_alpha": self.peft_config.lora_alpha,
             "lora_dropout": self.peft_config.lora_dropout,
             "fan_in_fan_out": self.peft_config.fan_in_fan_out,
@@ -337,6 +386,9 @@ class Linear(nn.Linear, LoraLayer):
         lora_encoder: nn.Linear,
         lora_decoder: nn.Linear,
         r: int = 0,
+        r1: int = None,
+        r2: int = None,
+        dense_activation: str = "gelu",
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
@@ -352,14 +404,18 @@ class Linear(nn.Linear, LoraLayer):
         self.lora_type = "denselora"
         self.lora_encoder = lora_encoder
         self.lora_decoder = lora_decoder
-        self.nolinear = nn.GELU()
+        self.r1 = r1 if r1 is not None else self.r
+        self.r2 = r2 if r2 is not None else self.r
+        self.nolinear = _make_activation(dense_activation)
         if r > 0:
             if self.lora_type == 'lora':
                 self.lora_A = nn.Linear(in_features, r, bias=False)
                 self.lora_B = nn.Linear(r, out_features, bias=False)
             elif self.lora_type == 'denselora':
-                self.lora_m = nn.Linear(self.r, self.r, bias=False)
-            self.scaling = self.lora_alpha / self.r
+                # Dense matrix M: r1 -> r2 (square when r1 == r2).
+                self.lora_m = nn.Linear(self.r1, self.r2, bias=False)
+            # Scale by the largest rank so symmetric (alpha=2*r) keeps scaling=2.0.
+            self.scaling = self.lora_alpha / max(self.r1, self.r2)
             self.weight.requires_grad = False
         self.reset_parameters()
         if fan_in_fan_out:

@@ -24,7 +24,14 @@ TRANSFORMERS_MODELS_TO_ADAPTER_TYPE_MAPPING = {
 }
 
 def is_bnb_available():
-    return importlib.util.find_spec("bitsandbytes") is not None
+    # Actually import (not just find_spec) so a broken bitsandbytes — e.g. missing CUDA
+    # binary for this torch/CUDA combo — is treated as "unavailable" instead of crashing
+    # the whole peft import chain. We never use 8-bit training here.
+    try:
+        import bitsandbytes  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 if is_bnb_available():

@@ -16,7 +16,7 @@ import fire
 
 import torch
 
-sys.path.append(os.path.join(os.getcwd(), "peft/src/"))
+sys.path.insert(0, os.path.join(os.getcwd(), "peft/src/"))  # insert(0): peft LOKAL selalu menang atas peft pip
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import GenerationConfig, LlamaForCausalLM, LlamaTokenizer, AutoModelForCausalLM, AutoTokenizer
