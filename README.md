@@ -85,18 +85,5 @@ python commonsense_evaluate.py \
 ```
 `r1/r2/activation` are read automatically from `adapter_config.json` so the shape of M matches when loading the weights.
 
-
-
-## Citation
-If you find DenseLoRA useful, please consider giving a star and citation:
-```bibtex
-@Inproceedings{,
-  title={},
-  author={},
-  booktitle = {},
-  year={}
-}
-```
-
 ## Acknowledgement
 This repo benefits from Original Dense-Lora, LLM-Adapters, DoRA. Thanks for their wonderful works.
