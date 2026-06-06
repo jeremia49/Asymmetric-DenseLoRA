@@ -1,5 +1,5 @@
 <h1 align="center">
-    <p> Modified DenseLoRA<br> Fork of Dense Low-Rank Adaptation of Large Language Models</p>
+   <p>Asymmetric DenseLoRA</p>
 </h1>
 
 This fork extends DenseLoRA with a **non-square dense matrix M (asymmetric, r1×r2)** and three activation options (**GeLU / SiLU / GoLU**).
