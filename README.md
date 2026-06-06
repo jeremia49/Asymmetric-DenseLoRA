@@ -1,6 +1,12 @@
 <h1 align="center">
-   <p>Asymmetric DenseLoRA</p>
+   <p>Asymmetric DenseLoRA 
+      <h6 align="center">
+         Jeremia Manurung, Muhammad Ammar Muflih, Reza Ananda Hatmi
+      </h6>
+   </p>
 </h1>
+   
+   
 
 This fork extends DenseLoRA with a **non-square dense matrix M (asymmetric, r1×r2)** and three activation options (**GeLU / SiLU / GoLU**).
 ## What this fork adds
